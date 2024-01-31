@@ -6,6 +6,7 @@ import torch
 import transformers
 from transformers import GenerationConfig, AutoModelForCausalLM, AutoTokenizer
 
+from LLMPruner.evaluator.ppl import PPLMetric
 from LLMPruner.peft import PeftModel
 
 #from utils.callbacks import Iteratorize, Stream
@@ -51,7 +52,8 @@ def main(args):
     model.config.eos_token_id = 2
 
     model.eval()
-
+    # ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], 128, device='cuda')
+    # print("PPL after pruning: {}".format(ppl))
     def evaluate(
         input=None,
         temperature=0.1,
