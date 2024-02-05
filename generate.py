@@ -6,6 +6,7 @@ import torch
 import transformers
 from transformers import GenerationConfig, AutoModelForCausalLM, AutoTokenizer
 
+from LLMPruner.evaluator.ppl import PPLMetric
 from LLMPruner.peft import PeftModel
 
 #from utils.callbacks import Iteratorize, Stream
@@ -51,7 +52,8 @@ def main(args):
     model.config.eos_token_id = 2
 
     model.eval()
-
+    ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], 128, device='cuda')
+    print("PPL after pruning: {}".format(ppl))
     def evaluate(
         input=None,
         temperature=0.1,
@@ -110,7 +112,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Tuning Pruned LLaMA (huggingface version)')
 
-    parser.add_argument('--base_model', type=str, default="decapoda-research/llama-7b-hf", help='base model name')
+    parser.add_argument('--base_model', type=str, default="baffo32/decapoda-research-llama-7B-hf", help='base model name')
     parser.add_argument('--model_type', type=str, required=True, help = 'choose from ')
     parser.add_argument('--ckpt', type=str, default=None)
     parser.add_argument('--lora_ckpt', type=str, default=None)

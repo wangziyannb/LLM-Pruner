@@ -2,7 +2,7 @@ prune_ckpt_path='llama_prune'
 tune_ckpt_path='llama_0.2'
 
 echo "[START] - Start Pruning Model"
-CUDA_VISIBLE_DEVICES=0 python hf_prune.py --pruning_ratio 0.25 --device cpu  --eval_device cuda --block_wise --block_mlp_layer_start 4 --block_mlp_layer_end 30 --block_attention_layer_start 4 --block_attention_layer_end 30 --save_ckpt_log_name $prune_ckpt_path --pruner_type taylor --test_after_train --taylor param_first --save_model
+CUDA_VISIBLE_DEVICES=0 python hf_prune.py --pruning_ratio 0.25 --device cuda  --eval_device cuda --block_wise --block_mlp_layer_start 4 --block_mlp_layer_end 30 --block_attention_layer_start 4 --block_attention_layer_end 30 --save_ckpt_log_name $prune_ckpt_path --pruner_type taylor --test_after_train --taylor param_first --save_model
 echo "[FINISH] - Finish Pruning Model"
 
 echo "[START] - Start Tuning"
