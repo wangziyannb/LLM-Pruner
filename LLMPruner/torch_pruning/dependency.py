@@ -465,7 +465,7 @@ class DependencyGraph(object):
                 dep, idxs = processing_stack.pop(-1)
                 node, fn = dep.target, dep.handler
                 visited_node.add(node)
-                
+
                 for new_dep in node.dependencies:
                     if new_dep.is_triggered_by(fn):
                         new_indices = idxs
