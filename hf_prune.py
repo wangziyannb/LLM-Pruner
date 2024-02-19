@@ -60,10 +60,10 @@ def main(args):
                     top_p=args.top_p,
                     temperature=args.temperature,
                 )
-                
+
                 result = tokenizer.decode(generation_output[0])
                 logger.log(result)
-    
+
         ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], args.max_seq_len, device=args.device)
         logger.log("PPL before pruning: {}".format(ppl))
 
@@ -73,7 +73,7 @@ def main(args):
     for param in model.parameters():
         param.requires_grad_(True)
     before_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+
     forward_prompts = torch.tensor([
         [    1,   306,  4658,   278,  6593,   310,  2834,   338],
         [    1,  3439, 17632,  1925, 29892,   278,  6368,   310],
@@ -91,13 +91,13 @@ def main(args):
         raise NotImplementedError
 
     logger.log("Use {} pruner...".format(pruner_type))
-    
+
     if args.block_wise:
         kwargs = {
             "importance": imp,
             "global_pruning": args.global_pruning,
             "iterative_steps": args.iterative_steps,
-            "ch_sparsity": args.pruning_ratio, 
+            "ch_sparsity": args.pruning_ratio,
             "ignored_layers":[],
             "channel_groups": {
             },
@@ -107,9 +107,28 @@ def main(args):
             "customized_pruners": {
                 LlamaRMSNorm: llama_pruner.hf_rmsnorm_pruner,
             },
-            "root_module_types": None, 
-            "root_instances": [model.model.layers[i].self_attn.q_proj for i in range(args.block_attention_layer_start, args.block_attention_layer_end)] +
+            "root_module_types": None,
+            "root_instances": [model.model.layers[i].self_attn.q_proj for i in
+                               range(args.block_attention_layer_start, args.block_attention_layer_end)]+
+                              # [model.model.layers[i].self_attn.k_proj for i in
+                              #  range(args.block_attention_layer_start, args.block_attention_layer_end)]+
+                              # [model.model.layers[i].self_attn.v_proj for i in
+                              #  range(args.block_attention_layer_start, args.block_attention_layer_end)]
+                              # +
+                              # [model.model.layers[i].mlp.gate_proj for i in
+                              #  range(args.block_mlp_layer_start, args.block_mlp_layer_end)]
+            # "root_instances": [model.model.layers[i].self_attn.q_proj for i in range(args.block_attention_layer_start, args.block_attention_layer_end)] +
+            #                   [model.model.layers[i].self_attn.k_proj for i in
+            #                    range(args.block_attention_layer_start, args.block_attention_layer_end)]+
+            #                   [model.model.layers[i].self_attn.v_proj for i in range(args.block_attention_layer_start, args.block_attention_layer_end)]+
+            #                   [model.model.layers[i].self_attn.o_proj for i in
+            #                    range(args.block_attention_layer_start, args.block_attention_layer_end)] +
+            #
                               [model.model.layers[i].mlp.gate_proj for i in range(args.block_mlp_layer_start, args.block_mlp_layer_end)]
+            #                   +[model.model.layers[i].mlp.down_proj for i in
+            #                    range(args.block_mlp_layer_start, args.block_mlp_layer_end)]+
+            #                   [model.model.layers[i].mlp.up_proj for i in
+            #                    range(args.block_mlp_layer_start, args.block_mlp_layer_end)]
         }
         logger.log("Pruning Attention Layer = {}".format(list(range(args.block_attention_layer_start, args.block_attention_layer_end))))
         logger.log("Pruning MLP Layer = {}".format(list(range(args.block_mlp_layer_start, args.block_mlp_layer_end))))
@@ -142,7 +161,7 @@ def main(args):
                                 module_param.acc_grad = copy.deepcopy(module_param.grad)
                         model.zero_grad()
                         del loss.grad
-                    
+
                 loss = model(example_prompts, labels=example_prompts).loss
                 logger.log("Loss = {}".format(loss))
                 loss.backward()
@@ -150,8 +169,9 @@ def main(args):
             pruner.step()
 
             after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
             logger.log("After Iter {}/{}, #parameters: {}".format(i+1, args.iterative_steps, after_pruning_parameters))
-        
+
             # modify inferece-related attributes
             for layer in model.model.layers:
                 layer.self_attn.num_heads = layer.self_attn.q_proj.weight.data.shape[0] // layer.self_attn.head_dim
@@ -188,13 +208,27 @@ def main(args):
             **kwargs
         )
         model.zero_grad()
-        
+
         logger.log("Start Pruning")
         for i in range(args.iterative_steps):
-
             if pruner_type in ['taylor']:
                 example_prompts = get_examples('bookcorpus', tokenizer, 10, seq_len = 64)
                 logger.log("Start Backwarding in iterative steps = {}...".format(i))
+                if args.taylor in ['param_mix', 'param_second']:
+                    for j in range(args.num_examples):
+                        batch_input = example_prompts[j].unsqueeze(0)
+                        loss = model(batch_input, labels=batch_input).loss
+                        logger.log("Loss = {}".format(loss))
+                        loss.backward()
+
+                        for module_param in model.parameters():
+                            module_param.grad = module_param.grad * module_param.grad / args.num_examples
+                            if hasattr(module_param, 'acc_grad'):
+                                module_param.acc_grad += module_param.grad
+                            else:
+                                module_param.acc_grad = copy.deepcopy(module_param.grad)
+                        model.zero_grad()
+                        del loss.grad
                 loss = model(example_prompts, labels=example_prompts).loss
                 logger.log("Loss = {}".format(loss))
                 loss.backward()
@@ -213,32 +247,106 @@ def main(args):
         # modify inferece-related attributes
         model.config.hidden_size = model.model.embed_tokens.weight.shape[1]
         model.zero_grad()
-        
+
         del pruner
-            
+
     elif args.layer_wise:
         model.model.layers = model.model.layers[:args.layer]
         after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    elif args.modified_channel_wise:
+        layer =model.model.layers[0]
+        kwargs = {
+            "importance": imp,
+            "global_pruning": args.global_pruning,
+            "iterative_steps": args.iterative_steps,
+            "ch_sparsity": args.pruning_ratio,
+            # remove 50% channels, ResNet18 = {64, 128, 256, 512} => ResNet18_Half = {32, 64, 128, 256}
+            "ignored_layers": [],
+            # "round_to": model.config.num_attention_heads * 2,
+            "channel_groups": {
+                # layer.self_attn: layer.self_attn.num_heads for layer in model.model.layers
+            },
+            "consecutive_groups": {
+                layer.self_attn.q_proj: layer.self_attn.head_dim
+            },
+            "customized_pruners": {
+                LlamaRMSNorm: llama_pruner.hf_rmsnorm_pruner,
+                # LlamaAttention: llama_pruner.hf_attention_pruner,
+            },
+            "root_module_types": [LlamaRMSNorm, LlamaAttention],
+            "root_instances": [model.model.layers[i].self_attn.q_proj for i in
+                               range(args.block_attention_layer_start, args.block_attention_layer_end)] +
+                              [model.model.layers[i].mlp.gate_proj for i in
+                               range(args.block_mlp_layer_start, args.block_mlp_layer_end)]
+        }
 
+        pruner = tp.pruner.MetaPruner(
+            model,
+            forward_prompts,
+            **kwargs
+        )
+        model.zero_grad()
+
+        logger.log("Start Pruning")
+        for i in range(args.iterative_steps):
+            if pruner_type in ['taylor']:
+                example_prompts = get_examples('bookcorpus', tokenizer, 10, seq_len=64)
+                logger.log("Start Backwarding in iterative steps = {}...".format(i))
+                if args.taylor in ['param_mix', 'param_second']:
+                    for j in range(args.num_examples):
+                        batch_input = example_prompts[j].unsqueeze(0)
+                        loss = model(batch_input, labels=batch_input).loss
+                        logger.log("Loss = {}".format(loss))
+                        loss.backward()
+
+                        for module_param in model.parameters():
+                            module_param.grad = module_param.grad * module_param.grad / args.num_examples
+                            if hasattr(module_param, 'acc_grad'):
+                                module_param.acc_grad += module_param.grad
+                            else:
+                                module_param.acc_grad = copy.deepcopy(module_param.grad)
+                        model.zero_grad()
+                        del loss.grad
+                loss = model(example_prompts, labels=example_prompts).loss
+                logger.log("Loss = {}".format(loss))
+                loss.backward()
+
+            pruner.step()
+
+            after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            logger.log(
+                "After Iter {}/{}, #parameters: {}".format(i + 1, args.iterative_steps, after_pruning_parameters))
+
+        # Clean the gradient in the model
+        model.zero_grad()
+        for name, module in model.named_parameters():
+            if 'weight' in name:
+                module.grad = None
+
+        # modify inferece-related attributes
+        model.config.hidden_size = model.model.embed_tokens.weight.shape[1]
+        model.zero_grad()
+
+        del pruner
     else:
         raise NotImplementedError
     logger.log("#Param before: {}, #Param after: {}, Ratio = {:.4f}%".format(before_pruning_parameters, after_pruning_parameters,  100.0*after_pruning_parameters/before_pruning_parameters))
-    
+
     gc.collect()
     torch.cuda.empty_cache()
 
     if args.save_model:
         model.half()
         torch.save({
-            'model': model, 
+            'model': model,
             'tokenizer': tokenizer,
         }, logger.best_checkpoint_path)
-    
+
     if args.eval_device != "cpu":
         model.half()
     model.to(args.eval_device)
 
-    model.config.pad_token_id = tokenizer.pad_token_id = 0 
+    model.config.pad_token_id = tokenizer.pad_token_id = 0
     model.config.bos_token_id = 1
     model.config.eos_token_id = 2
 
@@ -283,9 +391,10 @@ if __name__ == "__main__":
     parser.add_argument('--max_seq_len', type=int, default=128, help='max sequence length')
 
     # argument for layer-wise pruning/column-wise pruning
-    parser.add_argument('--channel_wise', action='store_true', help='channel wise')
+    parser.add_argument('--modified_channel_wise', action='store_true', help='channel wise')
     parser.add_argument('--block_wise', action='store_true', help='block wise')
     parser.add_argument('--layer_wise', action='store_true', help='layer wise')
+    parser.add_argument('--channel_wise', action='store_true', help='channel wise')
     parser.add_argument('--layer', type=int, default=12, help='remain the previous n layers')
 
     parser.add_argument('--block_attention_layer_start', type=int, help='start layer of block attention layers', default=3)

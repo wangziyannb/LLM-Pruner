@@ -52,67 +52,67 @@ def main(args):
     model.config.eos_token_id = 2
 
     model.eval()
-    # ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], 128, device='cuda')
-    # print("PPL after pruning: {}".format(ppl))
-    def evaluate(
-        input=None,
-        temperature=0.1,
-        top_p=0.75,
-        top_k=40,
-        max_new_tokens=128,
-        stream_output=False,
-        **kwargs,
-    ):
-        inputs = tokenizer(input, return_tensors="pt")
-        input_ids = inputs["input_ids"].to(device)
-
-        with torch.no_grad():
-            generation_output = model.generate(
-                input_ids=input_ids,
-                do_sample=True,
-                top_k=50,
-                top_p=top_p,
-                temperature=temperature,
-                max_length=max_new_tokens,
-                return_dict_in_generate=True,
-            )
-        s = generation_output.sequences[0]
-        output = tokenizer.decode(s)
-        yield output
-
-    gr.Interface(
-        fn=evaluate,
-        inputs=[
-            gr.components.Textbox(lines=2, label="Input", placeholder="none"),
-            gr.components.Slider(
-                minimum=0, maximum=1, value=1, label="Temperature"
-            ),
-            gr.components.Slider(
-                minimum=0, maximum=1, value=0.95, label="Top p"
-            ),
-            gr.components.Slider(
-                minimum=0, maximum=100, step=1, value=50, label="Top k"
-            ),
-            gr.components.Slider(
-                minimum=1, maximum=2000, step=1, value=128, label="Max tokens"
-            ),
-            gr.components.Checkbox(label="Stream output"),
-        ],
-        outputs=[
-            gr.inputs.Textbox(
-                lines=5,
-                label="Output",
-            )
-        ],
-        title="Evaluate Pruned Model",
-        description=description,
-    ).queue().launch(server_name="0.0.0.0", share=args.share_gradio)
+    ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], 128, device='cuda')
+    print("PPL after pruning: {}".format(ppl))
+    # def evaluate(
+    #     input=None,
+    #     temperature=0.1,
+    #     top_p=0.75,
+    #     top_k=40,
+    #     max_new_tokens=128,
+    #     stream_output=False,
+    #     **kwargs,
+    # ):
+    #     inputs = tokenizer(input, return_tensors="pt")
+    #     input_ids = inputs["input_ids"].to(device)
+    #
+    #     with torch.no_grad():
+    #         generation_output = model.generate(
+    #             input_ids=input_ids,
+    #             do_sample=True,
+    #             top_k=50,
+    #             top_p=top_p,
+    #             temperature=temperature,
+    #             max_length=max_new_tokens,
+    #             return_dict_in_generate=True,
+    #         )
+    #     s = generation_output.sequences[0]
+    #     output = tokenizer.decode(s)
+    #     yield output
+    #
+    # gr.Interface(
+    #     fn=evaluate,
+    #     inputs=[
+    #         gr.components.Textbox(lines=2, label="Input", placeholder="none"),
+    #         gr.components.Slider(
+    #             minimum=0, maximum=1, value=1, label="Temperature"
+    #         ),
+    #         gr.components.Slider(
+    #             minimum=0, maximum=1, value=0.95, label="Top p"
+    #         ),
+    #         gr.components.Slider(
+    #             minimum=0, maximum=100, step=1, value=50, label="Top k"
+    #         ),
+    #         gr.components.Slider(
+    #             minimum=1, maximum=2000, step=1, value=128, label="Max tokens"
+    #         ),
+    #         gr.components.Checkbox(label="Stream output"),
+    #     ],
+    #     outputs=[
+    #         gr.inputs.Textbox(
+    #             lines=5,
+    #             label="Output",
+    #         )
+    #     ],
+    #     title="Evaluate Pruned Model",
+    #     description=description,
+    # ).queue().launch(server_name="0.0.0.0", share=args.share_gradio)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Tuning Pruned LLaMA (huggingface version)')
 
-    parser.add_argument('--base_model', type=str, default="decapoda-research/llama-7b-hf", help='base model name')
+    parser.add_argument('--base_model', type=str, default="baffo32/decapoda-research-llama-7B-hf", help='base model name')
     parser.add_argument('--model_type', type=str, required=True, help = 'choose from ')
     parser.add_argument('--ckpt', type=str, default=None)
     parser.add_argument('--lora_ckpt', type=str, default=None)

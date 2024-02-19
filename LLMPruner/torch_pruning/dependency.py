@@ -465,7 +465,7 @@ class DependencyGraph(object):
                 dep, idxs = processing_stack.pop(-1)
                 node, fn = dep.target, dep.handler
                 visited_node.add(node)
-                
+
                 for new_dep in node.dependencies:
                     if new_dep.is_triggered_by(fn):
                         new_indices = idxs
@@ -485,7 +485,6 @@ class DependencyGraph(object):
                             processing_stack.append(
                                 (new_dep, new_indices)
                             )
-
         _fix_dependency_graph_non_recursive(*group[0])
 
         # merge pruning ops
@@ -506,7 +505,7 @@ class DependencyGraph(object):
             if root_module_types is not None:
                 if isinstance(m, tuple(root_module_types)):
                     flag = True
-            
+            # root_instance is passed when deciding pruning blocks
             if root_instances is not None:
                 for root_instance in root_instances:
                     if m == root_instance:

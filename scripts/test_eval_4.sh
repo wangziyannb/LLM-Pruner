@@ -1,0 +1,7 @@
+SCRIPT_A='scripts/a.sh'
+BASE_MODEL='baffo32/decapoda-research-llama-7B-hf'
+
+CUDA_VISIBLE_DEVICES=3 bash $SCRIPT_A $BASE_MODEL tune_log/llama_prune_0.2_with_tune_channel_param_first prune_log/llama_prune_0.2_without_tune_channel_param_first 1400
+CUDA_VISIBLE_DEVICES=3 bash $SCRIPT_A $BASE_MODEL tune_log/llama_prune_0.2_with_tune_channel_param_second prune_log/llama_prune_0.2_without_tune_channel_param_second 1400
+CUDA_VISIBLE_DEVICES=3 bash $SCRIPT_A $BASE_MODEL tune_log/llama_prune_0.2_with_tune_channel_param_mix prune_log/llama_prune_0.2_without_tune_channel_param_mix 1400
+#CUDA_VISIBLE_DEVICES=1 bash $SCRIPT_A $BASE_MODEL tune_log/llama_prune_0.2_with_tune_channel_vectorize prune_log/llama_prune_0.2_without_tune_channel_vectorize 1400

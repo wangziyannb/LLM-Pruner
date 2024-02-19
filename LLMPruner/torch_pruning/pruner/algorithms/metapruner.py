@@ -271,6 +271,7 @@ class MetaPruner:
                     pruning_idxs = torch.cat(
                         [pruning_idxs+group_size*i for i in range(ch_groups)], 0)
                 elif consecutive_groups > 1:
+                    # n_pruned//consecutive_groups
                     pruning_groups = imp_argsort[:(n_pruned//consecutive_groups)]
                     group_size = consecutive_groups
                     pruning_idxs = torch.cat(
