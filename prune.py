@@ -36,26 +36,29 @@ def set_random_seed(seed):
 class MaskedLinear(nn.Linear):
     def __init__(self, in_features, out_features, bias=True):
         super(MaskedLinear, self).__init__(in_features, out_features, bias)
-        self.input_mask = nn.Parameter(torch.ones(in_features), requires_grad=False)
-        self.output_mask = nn.Parameter(torch.ones(out_features), requires_grad=False)
         self.weight_mask = nn.Parameter(torch.ones(self.weight.size()), requires_grad=False)
         self.bias_mask = nn.Parameter(torch.ones(self.bias.size()), requires_grad=False)
 
     def forward(self, input):
-        masked_input = input * self.input_mask
         masked_weight = self.weight * self.weight_mask
         masked_bias = self.bias * self.bias_mask
-        # 执行线性变换
-        output = F.linear(masked_input, masked_weight, masked_bias)
-        # 应用输出掩码
-        masked_output = output * self.output_mask
-        return masked_output
+        output = F.linear(input, masked_weight, masked_bias)
+        # for i in masked_weight:
+        #     print(i)
+        return output
 
-    def apply_mask(self, idxs):
-        for i in idxs:
-            row = i // self.in_features
-            col = i % self.in_features
-            self.weight_mask[row, col] = 0
+    def apply_mask(self, idxs, prune_fn):
+        # self.weight_mask = nn.Parameter(torch.zeros(self.weight.size()), requires_grad=False)
+        pruned_params = 0
+        if prune_fn in ["linear_out"]:
+            for i in idxs:
+                self.weight_mask[i, :] = 0
+                pruned_params += len(self.weight_mask[i])
+        elif prune_fn in ["linear_in"]:
+            for i in idxs:
+                self.weight_mask[:, i] = 0
+                pruned_params += len(self.weight_mask)
+        return pruned_params
 
 
 class TaylorImportance(tp.importance.Importance):
@@ -156,15 +159,18 @@ class TaylorImportance(tp.importance.Importance):
         return group_imp
 
 
-def get_mask(imp, layer, prune_fn, idxs, head_dim=1):
+def get_mask(imp, layer, prune_fn, idxs, target_sparsity, head_dim=1):
     imps = imp(layer, prune_fn, idxs)
-    target_sparsity = 0.25
-    current_channels = layer.out_features
+    if prune_fn in ["linear_out"]:
+        current_channels = layer.out_features
+    elif prune_fn in ["linear_in"]:
+        current_channels = layer.in_features
+    else:
+        current_channels = layer.out_features
     n_pruned = current_channels - int(
         current_channels *
         (1 - target_sparsity)
     )
-    print(current_channels, n_pruned)
     if n_pruned <= 0:
         return
 
@@ -182,6 +188,7 @@ def get_mask(imp, layer, prune_fn, idxs, head_dim=1):
              for i in pruning_groups], 0)
     else:
         pruning_idxs = imp_argsort[:n_pruned]
+    # print(len(pruning_idxs))
     return pruning_idxs
 
 
@@ -204,6 +211,8 @@ def main(args):
     pruner_type = args.pruner_type.lower()
     assert pruner_type in ['random', 'l2', 'l1', 'taylor']
     for param in model.parameters():
+        # if param.requires_grad:
+        #     print(param.numel())
         param.requires_grad_(True)
     before_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -225,16 +234,6 @@ def main(args):
         raise NotImplementedError
 
     logger.log("Use {} pruner...".format(pruner_type))
-
-    for i in model.model.layers:
-        i.self_attn.q_proj = MaskedLinear(i.self_attn.q_proj.in_features, i.self_attn.q_proj.out_features)
-        i.self_attn.k_proj = MaskedLinear(i.self_attn.k_proj.in_features, i.self_attn.k_proj.out_features)
-        i.self_attn.v_proj = MaskedLinear(i.self_attn.v_proj.in_features, i.self_attn.v_proj.out_features)
-        i.self_attn.o_proj = MaskedLinear(i.self_attn.o_proj.in_features, i.self_attn.o_proj.out_features)
-        i.mlp.down_proj = MaskedLinear(i.mlp.down_proj.in_features, i.mlp.down_proj.out_features)
-        i.mlp.gate_proj = MaskedLinear(i.mlp.gate_proj.in_features, i.mlp.gate_proj.out_features)
-        i.mlp.up_proj = MaskedLinear(i.mlp.up_proj.in_features, i.mlp.up_proj.out_features)
-
     logger.log("Pruning Attention Layer = {}".format(
         list(range(args.block_attention_layer_start, args.block_attention_layer_end))))
     logger.log("Pruning MLP Layer = {}".format(list(range(args.block_mlp_layer_start, args.block_mlp_layer_end))))
@@ -245,7 +244,7 @@ def main(args):
         out = model(*forward_prompts)
     except:
         out = model(forward_prompts)
-
+    pruned_params = 0
     for i in range(args.iterative_steps):
         if pruner_type in ['taylor']:
             example_prompts = get_examples('bookcorpus', tokenizer, 10, seq_len=64)
@@ -258,11 +257,12 @@ def main(args):
                     loss.backward()
 
                     for module_param in model.parameters():
-                        module_param.grad = module_param.grad * module_param.grad / args.num_examples
-                        if hasattr(module_param, 'acc_grad'):
-                            module_param.acc_grad += module_param.grad
-                        else:
-                            module_param.acc_grad = copy.deepcopy(module_param.grad)
+                        if module_param.requires_grad:
+                            module_param.grad = module_param.grad * module_param.grad / args.num_examples
+                            if hasattr(module_param, 'acc_grad'):
+                                module_param.acc_grad += module_param.grad
+                            else:
+                                module_param.acc_grad = copy.deepcopy(module_param.grad)
                     model.zero_grad()
                     del loss.grad
             loss = model(example_prompts, labels=example_prompts).loss
@@ -270,40 +270,89 @@ def main(args):
             loss.backward()
 
         # pruner.step()
-        after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.log(
-            "After Iter {}/{}, #parameters: {}".format(i + 1, args.iterative_steps, after_pruning_parameters))
+        def apply_mask(layer, idxs, prune_fn):
+            pruned_params = 0
+            original_size = layer.weight.numel()
+            idxs.sort(reverse=True)
+            if prune_fn in ["linear_out"]:
+                # s=layer.weight.data
+                # # mask only
+                # for i in idxs:
+                #     s[i, :] = 0
+                #     pruned_params += len(layer.weight.data[i])
+                # s=s.numpy()
+                # print()
+                # prune shape
+                rows_mask = torch.ones(layer.weight.data.size(0), dtype=torch.bool)
+                rows_mask[idxs] = False
+                layer.weight.data = layer.weight.data[rows_mask]
+                layer.out_features -= len(idxs)
+                # x=layer.weight.data.numpy()
+                # print()
+                # x= layer.weight.data[rows_mask]
+                # print(x.max())
+
+                #     layer.out_features -= 1
+                # rows_to_keep = layer.weight.data.all(dim=1).bool()
+                # layer.weight.data=layer.weight.data[rows_to_keep]
+            elif prune_fn in ["linear_in"]:
+                cols_mask = torch.ones(layer.weight.data.size(1), dtype=torch.bool)
+                cols_mask[idxs] = False
+                layer.weight.data = layer.weight.data[:, cols_mask]
+                layer.in_features -= len(idxs)
+                # for i in idxs:
+                # layer.weight.data[:, i] = 0
+                # pruned_params += len(layer.weight.data)
+
+                #     layer.in_features -= 1
+                # cols_to_keep = layer.weight.data.all(dim=0).bool()
+                # layer.weight.data = layer.weight.data[:, cols_to_keep]
+            pruned_size = layer.weight.numel()
+            # print(pruned_size / original_size)
+            return pruned_params
+
         for i in range(args.block_attention_layer_start, args.block_attention_layer_end):
             layer = model.model.layers[i]
             pruning_idxs = get_mask(imp, layer.self_attn.q_proj, "linear_out",
-                                    [x for x in range(layer.self_attn.q_proj.out_features)], layer.self_attn.head_dim)
-            layer.self_attn.q_proj.apply_mask(pruning_idxs.tolist())
-            pruning_idxs = get_mask(imp, layer.self_attn.k_proj, "linear_out",
-                                    [x for x in range(layer.self_attn.k_proj.out_features)], layer.self_attn.head_dim)
-            layer.self_attn.k_proj.apply_mask(pruning_idxs.tolist())
-
-            pruning_idxs = get_mask(imp, layer.self_attn.v_proj, "linear_out",
-                                    [x for x in range(layer.self_attn.v_proj.out_features)], layer.self_attn.head_dim)
-            layer.self_attn.v_proj.apply_mask(pruning_idxs.tolist())
-
-            pruning_idxs = get_mask(imp, layer.self_attn.o_proj, "linear_in",
-                                    [x for x in range(layer.self_attn.o_proj.in_features)], layer.self_attn.head_dim)
-            layer.self_attn.o_proj.apply_mask(pruning_idxs.tolist())
+                                    [x for x in range(layer.self_attn.q_proj.out_features)], args.pruning_ratio,
+                                    layer.self_attn.head_dim)
+            pruned_params += apply_mask(layer.self_attn.q_proj, pruning_idxs.tolist(), "linear_out")
+            # pruning_idxs = get_mask(imp, layer.self_attn.k_proj, "linear_out",
+            #                         [x for x in range(layer.self_attn.k_proj.out_features)], args.pruning_ratio,
+            #                         layer.self_attn.head_dim)
+            pruned_params += apply_mask(layer.self_attn.k_proj, pruning_idxs.tolist(), "linear_out")
+            # pruning_idxs = get_mask(imp, layer.self_attn.v_proj, "linear_out",
+            #                         [x for x in range(layer.self_attn.v_proj.out_features)], args.pruning_ratio,
+            #                         layer.self_attn.head_dim)
+            pruned_params += apply_mask(layer.self_attn.v_proj, pruning_idxs.tolist(), "linear_out")
+            # pruning_idxs = get_mask(imp, layer.self_attn.v_proj, "linear_out",
+            #                         [x for x in range(layer.self_attn.v_proj.out_features)], args.pruning_ratio,
+            #                         layer.self_attn.head_dim)
+            # pruned_params += apply_mask(layer.self_attn.v_proj, pruning_idxs.tolist(), "linear_out")
+            # pruning_idxs = get_mask(imp, layer.self_attn.o_proj, "linear_in",
+            #                         [x for x in range(layer.self_attn.o_proj.in_features)], args.pruning_ratio,
+            #                         layer.self_attn.head_dim)
+            pruned_params += apply_mask(layer.self_attn.o_proj, pruning_idxs.tolist(), "linear_in")
 
         for i in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
             layer = model.model.layers[i]
             pruning_idxs = get_mask(imp, layer.mlp.gate_proj, "linear_out",
-                                    [x for x in range(layer.mlp.gate_proj.out_features)])
-            layer.mlp.gate_proj.apply_mask(pruning_idxs.tolist())
-            pruning_idxs = get_mask(imp, layer.mlp.up_proj, "linear_out",
-                                    [x for x in range(layer.mlp.up_proj.out_features)])
-            layer.mlp.up_proj.apply_mask(pruning_idxs.tolist())
-            pruning_idxs = get_mask(imp, layer.mlp.down_proj, "linear_in",
-                                    [x for x in range(layer.mlp.down_proj.in_features)])
-            layer.mlp.down_proj.apply_mask(pruning_idxs.tolist())
-        after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.log("#Param before: {}, #Param after: {}, Ratio = {:.4f}%".format(before_pruning_parameters,
-                                                                                 after_pruning_parameters,
+                                    [x for x in range(layer.mlp.gate_proj.out_features)], args.pruning_ratio)
+            pruned_params += apply_mask(layer.mlp.gate_proj, pruning_idxs.tolist(), "linear_out")
+            # pruning_idxs = get_mask(imp, layer.mlp.up_proj, "linear_out",
+            #                         [x for x in range(layer.mlp.up_proj.out_features)], args.pruning_ratio)
+            pruned_params += apply_mask(layer.mlp.up_proj, pruning_idxs.tolist(), "linear_out")
+            # pruning_idxs = get_mask(imp, layer.mlp.down_proj, "linear_in",
+            #                         [x for x in range(layer.mlp.down_proj.in_features)], args.pruning_ratio)
+            pruned_params += apply_mask(layer.mlp.down_proj, pruning_idxs.tolist(), "linear_in")
+    after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    for layer in model.model.layers:
+        layer.self_attn.num_heads = layer.self_attn.q_proj.weight.data.shape[0] // layer.self_attn.head_dim
+
+    # after_pruning_parameters = before_pruning_parameters - pruned_params
+    logger.log("#Param before: {}, #Param after: {}, Ratio = {:.4f}%".format(before_pruning_parameters,
+                                                                             after_pruning_parameters,
                                                                              100.0 * after_pruning_parameters / before_pruning_parameters))
 
     gc.collect()
@@ -349,6 +398,7 @@ def main(args):
     ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], args.max_seq_len, device=args.eval_device)
     logger.log("PPL after pruning: {}".format(ppl))
     logger.log("Memory Requirement: {} MiB\n".format(torch.cuda.memory_allocated() / 1024 / 1024))
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pruning LLaMA (huggingface version)')
