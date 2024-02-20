@@ -53,7 +53,7 @@ def main(args):
 
     model.eval()
     ppl = PPLMetric(model, tokenizer, ['wikitext2', 'ptb'], 128, device='cuda')
-    print("PPL after pruning: {}".format(ppl))
+    print(args.lora_ckpt, " PPL after pruning: {}".format(ppl))
     # def evaluate(
     #     input=None,
     #     temperature=0.1,
