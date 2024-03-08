@@ -25,6 +25,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import matplotlib.pyplot as plt
+import csv
+import pandas as pd
+
 
 def set_random_seed(seed):
     random.seed(seed)
@@ -33,32 +37,32 @@ def set_random_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-# class MaskedLinear(nn.Linear):
-#     def __init__(self, in_features, out_features, bias=True):
-#         super(MaskedLinear, self).__init__(in_features, out_features, bias)
-#         self.weight_mask = nn.Parameter(torch.ones(self.weight.size()), requires_grad=False)
-#         self.bias_mask = nn.Parameter(torch.ones(self.bias.size()), requires_grad=False)
-#
-#     def forward(self, input):
-#         masked_weight = self.weight * self.weight_mask
-#         masked_bias = self.bias * self.bias_mask
-#         output = F.linear(input, masked_weight, masked_bias)
-#         # for i in masked_weight:
-#         #     print(i)
-#         return output
-#
-#     def apply_mask(self, idxs, prune_fn):
-#         # self.weight_mask = nn.Parameter(torch.zeros(self.weight.size()), requires_grad=False)
-#         pruned_params = 0
-#         if prune_fn in ["linear_out"]:
-#             for i in idxs:
-#                 self.weight_mask[i, :] = 0
-#                 pruned_params += len(self.weight_mask[i])
-#         elif prune_fn in ["linear_in"]:
-#             for i in idxs:
-#                 self.weight_mask[:, i] = 0
-#                 pruned_params += len(self.weight_mask)
-#         return pruned_params
+class MaskedLinear(nn.Linear):
+    def __init__(self, in_features, out_features, bias=True):
+        super(MaskedLinear, self).__init__(in_features, out_features, bias)
+        self.weight_mask = nn.Parameter(torch.ones(self.weight.size()), requires_grad=False)
+        self.bias_mask = nn.Parameter(torch.ones(self.bias.size()), requires_grad=False)
+
+    def forward(self, input):
+        masked_weight = self.weight * self.weight_mask
+        masked_bias = self.bias * self.bias_mask
+        output = F.linear(input, masked_weight, masked_bias)
+        # for i in masked_weight:
+        #     print(i)
+        return output
+
+    def apply_mask(self, idxs, prune_fn):
+        # self.weight_mask = nn.Parameter(torch.zeros(self.weight.size()), requires_grad=False)
+        pruned_params = 0
+        if prune_fn in ["linear_out"]:
+            for i in idxs:
+                self.weight_mask[i, :] = 0
+                pruned_params += len(self.weight_mask[i])
+        elif prune_fn in ["linear_in"]:
+            for i in idxs:
+                self.weight_mask[:, i] = 0
+                pruned_params += len(self.weight_mask)
+        return pruned_params
 
 
 class TaylorImportance(tp.importance.Importance):
@@ -159,8 +163,13 @@ class TaylorImportance(tp.importance.Importance):
         return group_imp
 
 
-def get_mask(imp, layer, prune_fn, idxs, target_sparsity, head_dim=1):
-    imps = imp(layer, prune_fn, idxs)
+class RandomImportance(tp.importance.Importance):
+    @torch.no_grad()
+    def __call__(self, layer, prune_fn, idxs):
+        return torch.rand(len(idxs))
+
+
+def get_mask(imps, layer, prune_fn, target_sparsity, head_dim=1):
     if prune_fn in ["linear_out"]:
         current_channels = layer.out_features
     elif prune_fn in ["linear_in"]:
@@ -219,11 +228,15 @@ def main(args):
     forward_prompts = torch.tensor([
         [1, 306, 4658, 278, 6593, 310, 2834, 338],
         [1, 3439, 17632, 1925, 29892, 278, 6368, 310],
+        # [1, 319, 11473, 2643, 378, 629, 271, 18099],
+        # [1, 4103, 9632, 4223, 304, 5176, 29901, 13],
     ]).to(
-        args.device)  # Only for building the dependency graph. Any input will be fine since the computation result are not taken into consideration.
+        args.device)
+
+    # forward_prompts = get_examples('bookcorpus', tokenizer, 10, seq_len=64).to(args.device)
 
     if pruner_type == 'random':
-        imp = tp.importance.RandomImportance()
+        imp = RandomImportance()
     elif pruner_type == 'l1':
         imp = llama_pruner.MagnitudeImportance(p=1)
     elif pruner_type == 'l2':
@@ -244,10 +257,10 @@ def main(args):
         out = model(*forward_prompts)
     except:
         out = model(forward_prompts)
-    pruned_params = 0
+
     for i in range(args.iterative_steps):
         if pruner_type in ['taylor']:
-            example_prompts = get_examples('bookcorpus', tokenizer, 10, seq_len=64)
+            example_prompts = get_examples('bookcorpus', tokenizer, 10, seq_len=64).to(args.device)
             logger.log("Start Backwarding in iterative steps = {}...".format(i))
             if args.taylor in ['param_mix', 'param_second']:
                 for j in range(args.num_examples):
@@ -269,9 +282,9 @@ def main(args):
             logger.log("Loss = {}".format(loss))
             loss.backward()
 
-        # pruner.step()
         def apply_mask(layer, idxs, prune_fn):
             idxs.sort(reverse=True)
+            before = layer.weight.numel()
             if prune_fn in ["linear_out"]:
                 rows_mask = torch.ones(layer.weight.data.size(0), dtype=torch.bool)
                 rows_mask[idxs] = False
@@ -282,41 +295,207 @@ def main(args):
                 cols_mask[idxs] = False
                 layer.weight.data = layer.weight.data[:, cols_mask]
                 layer.in_features -= len(idxs)
+            return 1 - layer.weight.numel() / before
 
-        for i in range(args.block_attention_layer_start, args.block_attention_layer_end):
-            layer = model.model.layers[i]
-            pruning_idxs = get_mask(imp, layer.self_attn.q_proj, "linear_out",
-                                    [x for x in range(layer.self_attn.q_proj.out_features)], args.pruning_ratio,
-                                    layer.self_attn.head_dim)
-            apply_mask(layer.self_attn.q_proj, pruning_idxs.tolist(), "linear_out")
-            # pruning_idxs = get_mask(imp, layer.self_attn.k_proj, "linear_out",
-            #                         [x for x in range(layer.self_attn.k_proj.out_features)], args.pruning_ratio,
-            #                         layer.self_attn.head_dim)
-            apply_mask(layer.self_attn.k_proj, pruning_idxs.tolist(), "linear_out")
-            # pruning_idxs = get_mask(imp, layer.self_attn.v_proj, "linear_out",
-            #                         [x for x in range(layer.self_attn.v_proj.out_features)], args.pruning_ratio,
-            #                         layer.self_attn.head_dim)
-            apply_mask(layer.self_attn.v_proj, pruning_idxs.tolist(), "linear_out")
-            # pruning_idxs = get_mask(imp, layer.self_attn.v_proj, "linear_out",
-            #                         [x for x in range(layer.self_attn.v_proj.out_features)], args.pruning_ratio,
-            #                         layer.self_attn.head_dim)
-            # pruned_params += apply_mask(layer.self_attn.v_proj, pruning_idxs.tolist(), "linear_out")
-            # pruning_idxs = get_mask(imp, layer.self_attn.o_proj, "linear_in",
-            #                         [x for x in range(layer.self_attn.o_proj.in_features)], args.pruning_ratio,
-            #                         layer.self_attn.head_dim)
-            apply_mask(layer.self_attn.o_proj, pruning_idxs.tolist(), "linear_in")
+        # pruner.step()
+        if args.global_pruning:
+            whole_imps_attn = torch.tensor([]).to(args.device)
+            whole_imps_attn_scaled = torch.tensor([]).to(args.device)
+            whole_imps_mlp = torch.tensor([]).to(args.device)
 
-        for i in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
-            layer = model.model.layers[i]
-            pruning_idxs = get_mask(imp, layer.mlp.gate_proj, "linear_out",
-                                    [x for x in range(layer.mlp.gate_proj.out_features)], args.pruning_ratio)
-            apply_mask(layer.mlp.gate_proj, pruning_idxs.tolist(), "linear_out")
-            # pruning_idxs = get_mask(imp, layer.mlp.up_proj, "linear_out",
-            #                         [x for x in range(layer.mlp.up_proj.out_features)], args.pruning_ratio)
-            apply_mask(layer.mlp.up_proj, pruning_idxs.tolist(), "linear_out")
-            # pruning_idxs = get_mask(imp, layer.mlp.down_proj, "linear_in",
-            #                         [x for x in range(layer.mlp.down_proj.in_features)], args.pruning_ratio)
-            apply_mask(layer.mlp.down_proj, pruning_idxs.tolist(), "linear_in")
+            pruning_ratio_mha = []
+            pruning_ratio_mlp = []
+
+            weight_norm_mha = []
+            activation_norm_mha = []
+            gradient_norm_mha = []
+            importance_norm_mha = []
+
+            weight_norm_mlp = []
+            activation_norm_mlp = []
+            gradient_norm_mlp = []
+            importance_norm_mlp = []
+
+            layer_x_mha = [x for x in range(args.block_attention_layer_start, args.block_attention_layer_end)]
+            layer_x_mlp = [x for x in range(args.block_mlp_layer_start, args.block_mlp_layer_end)]
+
+            for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
+                layer = model.model.layers[z]
+                weight_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight).tolist())
+                gradient_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight.grad).tolist())
+
+                imps = imp(layer.self_attn.q_proj, "linear_out", [1])
+
+                importance_norm_mha.append(torch.linalg.vector_norm(imps).tolist())
+
+                imps = imps.view(-1, layer.self_attn.head_dim).sum(1)
+
+                whole_imps_attn = torch.cat((whole_imps_attn, imps), dim=0)
+
+            mean = torch.mean(whole_imps_attn)
+            stdev = torch.std(whole_imps_attn, unbiased=False)
+            for z in range(len(whole_imps_attn)):
+                x = ((whole_imps_attn[z] - mean) / stdev).reshape(1)
+                whole_imps_attn_scaled=torch.cat((whole_imps_attn_scaled, x), dim=0)
+
+            plt.subplot(2, 2, 1)
+            plt.title("No scale Importance global")
+            plt.plot([x for x in range(len(whole_imps_attn))], whole_imps_attn.tolist(), label="no scale")
+            plt.subplot(2, 2, 2)
+            plt.title("Scaled Importance global")
+            plt.plot([x for x in range(len(whole_imps_attn_scaled))], whole_imps_attn_scaled.tolist(), label="scaled")
+            plt.subplot(2, 2, 3)
+            plt.title("No scale Importance layer-wise")
+            plt.plot([x for x in range(len(whole_imps_attn))], whole_imps_attn.tolist(), label="no scale")
+            plt.subplot(2, 2, 4)
+            plt.title("Scaled Importance layer-wise")
+            plt.plot([x for x in range(len(whole_imps_attn_scaled))], whole_imps_attn_scaled.tolist(), label="scaled")
+
+            plt.show()
+
+            # for z in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
+            #     layer = model.model.layers[z]
+            #     imps = imp(layer.mlp.gate_proj, "linear_out", [1])
+            #
+            #     importance_norm_mlp.append(torch.linalg.vector_norm(imps).tolist())
+            #
+            #     whole_imps_mlp = torch.cat((whole_imps_mlp, imps), dim=0)
+
+            imp_argsort = torch.argsort(whole_imps_attn)
+            n_pruned = len(imp_argsort) - int(
+                len(imp_argsort) *
+                (1 - 0.2)
+            )
+            pruning_groups = imp_argsort[:n_pruned]
+            pruning_groups = pruning_groups.tolist()
+            pruning_groups.sort()
+
+            for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
+                layer = model.model.layers[z]
+
+                pruning_idxs = torch.tensor([], dtype=torch.int8)
+                for j in range(layer.self_attn.num_heads):
+                    # i-> current layer index
+                    # j-> current head index (inside current layer)
+                    if (z - args.block_attention_layer_start) * layer.self_attn.num_heads + j in pruning_groups:
+                        pruning_idxs = torch.cat(
+                            (pruning_idxs,
+                             torch.tensor([j * layer.self_attn.head_dim + x for x in range(layer.self_attn.head_dim)])
+                             ),
+                            dim=0)
+                pruning_ratio_mha.append(apply_mask(layer.self_attn.q_proj, pruning_idxs.tolist(), "linear_out"))
+                apply_mask(layer.self_attn.k_proj, pruning_idxs.tolist(), "linear_out")
+                apply_mask(layer.self_attn.v_proj, pruning_idxs.tolist(), "linear_out")
+                apply_mask(layer.self_attn.o_proj, pruning_idxs.tolist(), "linear_in")
+
+            # pruning ratio plotting
+            # plt.subplot(2, 2, 1)
+            # plt.title('pruning ratio in MHA')
+            # plt.plot(layer_x_mha, pruning_ratio_mha, label='mha')
+            # # plt.plot(layer_x_mlp, pruning_ratio_mlp, label='mlp')
+            # plt.subplot(2, 2, 2)
+            # plt.title('Gradient')
+            # plt.plot(layer_x_mha, gradient_norm_mha, label='gradient')
+            # plt.subplot(2, 2, 3)
+            # plt.title('Weight')
+            # plt.plot(layer_x_mha, weight_norm_mha, label='weight')
+            # plt.subplot(2, 2, 4)
+            # plt.title('Tylor imp')
+            # plt.plot(layer_x_mha, importance_norm_mha, label='tylor imp')
+            # # plt.plot(layer_x_mha, activation_norm_mha, label='activation')
+            # plt.show()
+
+            y_axis_mha = [('mha', pruning_ratio_mha), ('gradient', gradient_norm_mha), ('weight', weight_norm_mha),
+                          ('tylor imp', importance_norm_mha), ('activation', activation_norm_mha)]
+            for index in range(4):
+                plt.subplot(2, 2, index + 1)
+                plt.title(y_axis_mha[index][0])
+                plt.plot(layer_x_mha, y_axis_mha[index][1], label=y_axis_mha[index][0])
+            plt.show()
+            print("")
+            # imp_argsort = torch.argsort(whole_imps_mlp)
+            # n_pruned = len(imp_argsort) - int(
+            #     len(imp_argsort) *
+            #     (1 - 0.2)
+            # )
+            # pruning_groups = imp_argsort[:n_pruned]
+            # pruning_groups = pruning_groups.tolist()
+            # pruning_groups.sort()
+            #
+            # for z in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
+            #     layer = model.model.layers[z]
+            #     pruning_idxs = torch.tensor([], dtype=torch.int8)
+            #     for j in range(layer.mlp.gate_proj.out_features):
+            #         # z-> current layer index
+            #         # j-> current vector index (inside current layer)
+            #         if (z - args.block_attention_layer_start) * layer.mlp.gate_proj.out_features + j in pruning_groups:
+            #             pruning_idxs = torch.cat(
+            #                 (pruning_idxs,
+            #                  torch.tensor([j])
+            #                  ),
+            #                 dim=0)
+            #     pruning_ratio_mlp.append(apply_mask(layer.mlp.gate_proj, pruning_idxs.tolist(), "linear_out"))
+            #     apply_mask(layer.mlp.up_proj, pruning_idxs.tolist(), "linear_out")
+            #     apply_mask(layer.mlp.down_proj, pruning_idxs.tolist(), "linear_in")
+            # y_axis_mlp = [('mlp', pruning_ratio_mlp), ('gradient', gradient_norm_mlp), ('weight', weight_norm_mlp),
+            #               ('tylor imp', importance_norm_mlp), ('activation', activation_norm_mlp)]
+            # for index in range(4):
+            #     plt.subplot(2, 2, i)
+            #     plt.plot(layer_x_mlp, y_axis_mlp[i][1], label=y_axis_mlp[i][0])
+            # plt.show()
+        else:
+
+            for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
+                layer = model.model.layers[z]
+                pruning_idxs = []
+                if args.mask_type_mha == 'q':
+                    imps = imp(layer.self_attn.q_proj, "linear_out", [])
+                    pruning_idxs = get_mask(imps, layer.self_attn.q_proj, "linear_out",
+                                            args.pruning_ratio,
+                                            layer.self_attn.head_dim if args.head_dim else 1)
+                elif args.mask_type_mha == 'k':
+                    imps = imp(layer.self_attn.k_proj, "linear_out", [])
+                    pruning_idxs = get_mask(imps, layer.self_attn.k_proj, "linear_out",
+                                            args.pruning_ratio,
+                                            layer.self_attn.head_dim if args.head_dim else 1)
+                elif args.mask_type_mha == 'v':
+                    imps = imp(layer.self_attn.v_proj, "linear_out", [])
+                    pruning_idxs = get_mask(imps, layer.self_attn.v_proj, "linear_out",
+                                            args.pruning_ratio,
+                                            layer.self_attn.head_dim if args.head_dim else 1)
+                elif args.mask_type_mha == 'o':
+                    imps = imp(layer.self_attn.o_proj, "linear_in", [])
+                    pruning_idxs = get_mask(imps, layer.self_attn.o_proj, "linear_in",
+                                            args.pruning_ratio,
+                                            layer.self_attn.head_dim if args.head_dim else 1)
+                else:
+                    raise NotImplementedError()
+                apply_mask(layer.self_attn.q_proj, pruning_idxs.tolist(), "linear_out")
+                apply_mask(layer.self_attn.k_proj, pruning_idxs.tolist(), "linear_out")
+                apply_mask(layer.self_attn.v_proj, pruning_idxs.tolist(), "linear_out")
+                apply_mask(layer.self_attn.o_proj, pruning_idxs.tolist(), "linear_in")
+
+            for z in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
+
+                layer = model.model.layers[z]
+                pruning_idxs = []
+                if args.mask_type_mlp == 'gate_proj':
+                    imps = imp(layer.mlp.gate_proj, "linear_out", [])
+                    pruning_idxs = get_mask(imps, layer.mlp.gate_proj, "linear_out",
+                                            args.pruning_ratio)
+                elif args.mask_type_mlp == 'up_proj':
+                    imps = imp(layer.mlp.up_proj, "linear_out", [])
+                    pruning_idxs = get_mask(imps, layer.mlp.up_proj, "linear_out",
+                                            args.pruning_ratio)
+                elif args.mask_type_mlp == 'down_proj':
+                    imps = imp(layer.mlp.down_proj, "linear_in", [])
+                    pruning_idxs = get_mask(imps, layer.mlp.down_proj, "linear_in",
+                                            args.pruning_ratio)
+                else:
+                    raise NotImplementedError()
+                apply_mask(layer.mlp.gate_proj, pruning_idxs.tolist(), "linear_out")
+                apply_mask(layer.mlp.up_proj, pruning_idxs.tolist(), "linear_out")
+                apply_mask(layer.mlp.down_proj, pruning_idxs.tolist(), "linear_in")
     after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     for layer in model.model.layers:
@@ -380,7 +559,9 @@ if __name__ == '__main__':
                         help='the path for save the checkpoint and the log. The final path would be log/{your_name_here}_{pruner_type}_{pruning_ratio}')
     parser.add_argument('--pruning_ratio', type=float, default=0.5, help='pruning ratio')
     parser.add_argument('--pruner_type', type=str, default='taylor', help='pruner type')
-
+    parser.add_argument('--mask_type_mha', type=str, default='q', help='use what layer as mask (in attention)')
+    parser.add_argument('--mask_type_mlp', type=str, default='gate_proj', help='use what layer as mask (in MLP)')
+    parser.add_argument('--head_dim', action='store_true', help='use head dimention when pruning MHA')
     # argument for generation
     parser.add_argument('--temperature', type=float, default=1.0, help='temperature')
     parser.add_argument('--top_p', type=float, default=0.95, help='top p')

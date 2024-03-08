@@ -9,8 +9,8 @@ from transformers import GenerationConfig, AutoModelForCausalLM, AutoTokenizer
 from LLMPruner.evaluator.ppl import PPLMetric
 from LLMPruner.peft import PeftModel
 
-#from utils.callbacks import Iteratorize, Stream
-#from utils.prompter import Prompter
+# from utils.callbacks import Iteratorize, Stream
+# from utils.prompter import Prompter
 
 if torch.cuda.is_available():
     device = "cuda"
@@ -18,12 +18,13 @@ else:
     device = "cpu"
 torch_version = int(torch.__version__.split('.')[1])
 
+
 def main(args):
     if args.model_type == 'pretrain':
         tokenizer = AutoTokenizer.from_pretrained(args.base_model)
         model = AutoModelForCausalLM.from_pretrained(
             args.base_model,
-            low_cpu_mem_usage=True if torch_version >=9 else False
+            low_cpu_mem_usage=True if torch_version >= 9 else False
         )
         description = "Model Type: {}\n Base Model: {}".format(args.model_type, args.base_model)
     elif args.model_type == 'pruneLLM':
@@ -38,14 +39,15 @@ def main(args):
             args.lora_ckpt,
             torch_dtype=torch.float16,
         )
-        description = "Model Type: {}\n Pruned Model: {}\n LORA ckpt: {}".format(args.model_type, args.ckpt, args.lora_ckpt)
+        description = "Model Type: {}\n Pruned Model: {}\n LORA ckpt: {}".format(args.model_type, args.ckpt,
+                                                                                 args.lora_ckpt)
     else:
         raise NotImplementedError
 
     if device == "cuda":
         model.half()
         model = model.cuda()
-    
+
     # unwind broken decapoda-research config
     model.config.pad_token_id = tokenizer.pad_token_id = 0  # unk
     model.config.bos_token_id = 1
@@ -112,13 +114,12 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Tuning Pruned LLaMA (huggingface version)')
 
-    parser.add_argument('--base_model', type=str, default="baffo32/decapoda-research-llama-7B-hf", help='base model name')
-    parser.add_argument('--model_type', type=str, required=True, help = 'choose from ')
+    parser.add_argument('--base_model', type=str, default="baffo32/decapoda-research-llama-7B-hf",
+                        help='base model name')
+    parser.add_argument('--model_type', type=str, required=True, help='choose from ')
     parser.add_argument('--ckpt', type=str, default=None)
     parser.add_argument('--lora_ckpt', type=str, default=None)
     parser.add_argument('--share_gradio', action='store_true')
 
     args = parser.parse_args()
     main(args)
-
-

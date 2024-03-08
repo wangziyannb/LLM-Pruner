@@ -1,0 +1,4 @@
+CUDA_VISIBLE_DEVICES=2 python prune_layer_test.py --record_file_path 'example1.csv' --base_model baffo32/decapoda-research-llama-7B-hf --pruning_ratio 0.8 --device cpu --eval_device cuda --head_dim --block_wise --block_mlp_layer_start 0 --block_mlp_layer_end 15 --block_attention_layer_start 0 --block_attention_layer_end 15 --save_ckpt_log_name 'llama_prune_0.8_layer_0_15' --pruner_type taylor --taylor param_first &
+CUDA_VISIBLE_DEVICES=3 python prune_layer_test.py --record_file_path 'example2.csv'  --base_model baffo32/decapoda-research-llama-7B-hf --pruning_ratio 0.8 --device cpu --eval_device cuda --head_dim --block_wise --block_mlp_layer_start 15 --block_mlp_layer_end 32 --block_attention_layer_start 15 --block_attention_layer_end 32 --save_ckpt_log_name 'llama_prune_0.8_layer_15_32' --pruner_type taylor --taylor param_first
+
+wait
