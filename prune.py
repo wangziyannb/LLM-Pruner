@@ -201,6 +201,15 @@ def get_mask(imps, layer, prune_fn, target_sparsity, head_dim=1):
     return pruning_idxs
 
 
+def plot(figure, x, y):
+    plt.figure(figsize=figure)
+    for index in range(len(y)):
+        plt.subplot((len(y) + 1) // 2, 2, index + 1)
+        plt.title(y[index][0])
+        plt.plot(x, y[index][1], label=y[index][0])
+    plt.show()
+
+
 def main(args):
     logger = LoggerWithDepth(
         env_name="{}".format(args.save_ckpt_log_name),
@@ -301,7 +310,11 @@ def main(args):
         if args.global_pruning:
             whole_imps_attn = torch.tensor([]).to(args.device)
             whole_imps_attn_scaled = torch.tensor([]).to(args.device)
+            whole_imps_attn_scaled_layer = torch.tensor([]).to(args.device)
+
             whole_imps_mlp = torch.tensor([]).to(args.device)
+            whole_imps_mlp_scaled = torch.tensor([]).to(args.device)
+            whole_imps_mlp_scaled_layer = torch.tensor([]).to(args.device)
 
             pruning_ratio_mha = []
             pruning_ratio_mlp = []
@@ -310,58 +323,91 @@ def main(args):
             activation_norm_mha = []
             gradient_norm_mha = []
             importance_norm_mha = []
+            importance_norm_mha_scale = []
 
             weight_norm_mlp = []
             activation_norm_mlp = []
             gradient_norm_mlp = []
             importance_norm_mlp = []
+            importance_norm_mlp_scale = []
 
             layer_x_mha = [x for x in range(args.block_attention_layer_start, args.block_attention_layer_end)]
             layer_x_mlp = [x for x in range(args.block_mlp_layer_start, args.block_mlp_layer_end)]
 
-            for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
+            for z in range(32):
                 layer = model.model.layers[z]
                 weight_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight).tolist())
                 gradient_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight.grad).tolist())
+                weight_norm_mlp.append(torch.linalg.matrix_norm(layer.mlp.gate_proj.weight).tolist())
+                gradient_norm_mlp.append(torch.linalg.matrix_norm(layer.mlp.gate_proj.weight.grad).tolist())
 
                 imps = imp(layer.self_attn.q_proj, "linear_out", [1])
-
                 importance_norm_mha.append(torch.linalg.vector_norm(imps).tolist())
-
+                imps_scaled = imps.clone()
+                mean = torch.mean(imps_scaled)
+                stdev = torch.std(imps_scaled, unbiased=False)
+                imps_scaled = (imps_scaled - mean) / stdev
+                importance_norm_mha_scale.append(torch.linalg.vector_norm(imps_scaled).tolist())
+                imps_scaled = imps_scaled.view(-1, layer.self_attn.head_dim).sum(1)
+                whole_imps_attn_scaled_layer = torch.cat((whole_imps_attn_scaled_layer, imps_scaled), dim=0)
                 imps = imps.view(-1, layer.self_attn.head_dim).sum(1)
-
                 whole_imps_attn = torch.cat((whole_imps_attn, imps), dim=0)
+
+                imps = imp(layer.mlp.gate_proj, "linear_out", [1])
+                importance_norm_mlp.append(torch.linalg.vector_norm(imps).tolist())
+                imps_scaled = imps.clone()
+                mean = torch.mean(imps_scaled)
+                stdev = torch.std(imps_scaled, unbiased=False)
+                imps_scaled = (imps_scaled - mean) / stdev
+                importance_norm_mlp_scale.append(torch.linalg.vector_norm(imps_scaled).tolist())
+                whole_imps_mlp_scaled_layer = torch.cat((whole_imps_mlp_scaled_layer, imps_scaled), dim=0)
+                whole_imps_mlp = torch.cat((whole_imps_mlp, imps), dim=0)
+
+            # for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
+            #     layer = model.model.layers[z]
+            #     weight_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight).tolist())
+            #     gradient_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight.grad).tolist())
+            #     imps = imp(layer.self_attn.q_proj, "linear_out", [1])
+            #     importance_norm_mha.append(torch.linalg.vector_norm(imps).tolist())
+            #     # channel-wise normalization
+            #     # imps_scaled = imps.view(-1, layer.self_attn.head_dim).clone()
+            #     # mean = torch.mean(imps_scaled, dim=1, keepdim=True)
+            #     # stdev = torch.std(imps_scaled, dim=1, unbiased=False, keepdim=True)
+            #     # imps_scaled = (imps_scaled - mean) / stdev
+            #     # imps_scaled = imps_scaled.sum(1)
+            #     imps_scaled = imps.clone()
+            #     mean = torch.mean(imps_scaled)
+            #     stdev = torch.std(imps_scaled, unbiased=False)
+            #     imps_scaled = (imps_scaled - mean) / stdev
+            #
+            #     importance_norm_mha_scale.append(torch.linalg.vector_norm(imps_scaled).tolist())
+            #
+            #     imps_scaled = imps_scaled.view(-1, layer.self_attn.head_dim).sum(1)
+            #
+            #     whole_imps_attn_scaled_layer = torch.cat((whole_imps_attn_scaled_layer, imps_scaled), dim=0)
+            #
+            #     imps = imps.view(-1, layer.self_attn.head_dim).sum(1)
+            #     whole_imps_attn = torch.cat((whole_imps_attn, imps), dim=0)
 
             mean = torch.mean(whole_imps_attn)
             stdev = torch.std(whole_imps_attn, unbiased=False)
-            for z in range(len(whole_imps_attn)):
-                x = ((whole_imps_attn[z] - mean) / stdev).reshape(1)
-                whole_imps_attn_scaled=torch.cat((whole_imps_attn_scaled, x), dim=0)
+            whole_imps_attn_scaled = (whole_imps_attn - mean) / stdev
 
-            plt.subplot(2, 2, 1)
-            plt.title("No scale Importance global")
-            plt.plot([x for x in range(len(whole_imps_attn))], whole_imps_attn.tolist(), label="no scale")
-            plt.subplot(2, 2, 2)
-            plt.title("Scaled Importance global")
-            plt.plot([x for x in range(len(whole_imps_attn_scaled))], whole_imps_attn_scaled.tolist(), label="scaled")
-            plt.subplot(2, 2, 3)
-            plt.title("No scale Importance layer-wise")
-            plt.plot([x for x in range(len(whole_imps_attn))], whole_imps_attn.tolist(), label="no scale")
-            plt.subplot(2, 2, 4)
-            plt.title("Scaled Importance layer-wise")
-            plt.plot([x for x in range(len(whole_imps_attn_scaled))], whole_imps_attn_scaled.tolist(), label="scaled")
+            plot((15, 10), [x for x in range(len(whole_imps_attn))],
+                 [("No scale Importance MHA", whole_imps_attn.tolist()),
+                  ("Scaled Importance global-wise", whole_imps_attn_scaled.tolist()),
+                  ("Scaled Importance layer-wise", whole_imps_attn_scaled_layer.tolist())])
 
-            plt.show()
+            mean = torch.mean(whole_imps_mlp)
+            stdev = torch.std(whole_imps_mlp, unbiased=False)
+            whole_imps_mlp_scaled = (whole_imps_mlp - mean) / stdev
 
-            # for z in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
-            #     layer = model.model.layers[z]
-            #     imps = imp(layer.mlp.gate_proj, "linear_out", [1])
-            #
-            #     importance_norm_mlp.append(torch.linalg.vector_norm(imps).tolist())
-            #
-            #     whole_imps_mlp = torch.cat((whole_imps_mlp, imps), dim=0)
+            plot((15, 10), [x for x in range(len(whole_imps_mlp))],
+                 [("No scale Importance MLP", whole_imps_mlp.tolist()),
+                  ("Scaled Importance global-wise", whole_imps_mlp_scaled.tolist()),
+                  ("Scaled Importance layer-wise", whole_imps_mlp_scaled_layer.tolist())])
 
-            imp_argsort = torch.argsort(whole_imps_attn)
+            imp_argsort = torch.argsort(whole_imps_attn_scaled_layer)
             n_pruned = len(imp_argsort) - int(
                 len(imp_argsort) *
                 (1 - 0.2)
@@ -369,10 +415,8 @@ def main(args):
             pruning_groups = imp_argsort[:n_pruned]
             pruning_groups = pruning_groups.tolist()
             pruning_groups.sort()
-
             for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
                 layer = model.model.layers[z]
-
                 pruning_idxs = torch.tensor([], dtype=torch.int8)
                 for j in range(layer.self_attn.num_heads):
                     # i-> current layer index
@@ -388,61 +432,47 @@ def main(args):
                 apply_mask(layer.self_attn.v_proj, pruning_idxs.tolist(), "linear_out")
                 apply_mask(layer.self_attn.o_proj, pruning_idxs.tolist(), "linear_in")
 
-            # pruning ratio plotting
-            # plt.subplot(2, 2, 1)
-            # plt.title('pruning ratio in MHA')
-            # plt.plot(layer_x_mha, pruning_ratio_mha, label='mha')
-            # # plt.plot(layer_x_mlp, pruning_ratio_mlp, label='mlp')
-            # plt.subplot(2, 2, 2)
-            # plt.title('Gradient')
-            # plt.plot(layer_x_mha, gradient_norm_mha, label='gradient')
-            # plt.subplot(2, 2, 3)
-            # plt.title('Weight')
-            # plt.plot(layer_x_mha, weight_norm_mha, label='weight')
-            # plt.subplot(2, 2, 4)
-            # plt.title('Tylor imp')
-            # plt.plot(layer_x_mha, importance_norm_mha, label='tylor imp')
-            # # plt.plot(layer_x_mha, activation_norm_mha, label='activation')
-            # plt.show()
-
-            y_axis_mha = [('mha', pruning_ratio_mha), ('gradient', gradient_norm_mha), ('weight', weight_norm_mha),
-                          ('tylor imp', importance_norm_mha), ('activation', activation_norm_mha)]
-            for index in range(4):
-                plt.subplot(2, 2, index + 1)
-                plt.title(y_axis_mha[index][0])
-                plt.plot(layer_x_mha, y_axis_mha[index][1], label=y_axis_mha[index][0])
-            plt.show()
-            print("")
-            # imp_argsort = torch.argsort(whole_imps_mlp)
-            # n_pruned = len(imp_argsort) - int(
-            #     len(imp_argsort) *
-            #     (1 - 0.2)
-            # )
-            # pruning_groups = imp_argsort[:n_pruned]
-            # pruning_groups = pruning_groups.tolist()
-            # pruning_groups.sort()
-            #
+            plot((18, 6), layer_x_mha,
+                 [('mha', pruning_ratio_mha), ('gradient', gradient_norm_mha), ('weight', weight_norm_mha),
+                  ('tylor imp', importance_norm_mha), ('scaled imp', importance_norm_mha_scale),
+                  ])
             # for z in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
             #     layer = model.model.layers[z]
-            #     pruning_idxs = torch.tensor([], dtype=torch.int8)
-            #     for j in range(layer.mlp.gate_proj.out_features):
-            #         # z-> current layer index
-            #         # j-> current vector index (inside current layer)
-            #         if (z - args.block_attention_layer_start) * layer.mlp.gate_proj.out_features + j in pruning_groups:
-            #             pruning_idxs = torch.cat(
-            #                 (pruning_idxs,
-            #                  torch.tensor([j])
-            #                  ),
-            #                 dim=0)
-            #     pruning_ratio_mlp.append(apply_mask(layer.mlp.gate_proj, pruning_idxs.tolist(), "linear_out"))
+            #     imps = imp(layer.mlp.gate_proj, "linear_out", [])
+            #     pruning_idxs = get_mask(imps, layer.mlp.gate_proj, "linear_out",
+            #                             args.pruning_ratio)
+            #     apply_mask(layer.mlp.gate_proj, pruning_idxs.tolist(), "linear_out")
             #     apply_mask(layer.mlp.up_proj, pruning_idxs.tolist(), "linear_out")
             #     apply_mask(layer.mlp.down_proj, pruning_idxs.tolist(), "linear_in")
-            # y_axis_mlp = [('mlp', pruning_ratio_mlp), ('gradient', gradient_norm_mlp), ('weight', weight_norm_mlp),
-            #               ('tylor imp', importance_norm_mlp), ('activation', activation_norm_mlp)]
-            # for index in range(4):
-            #     plt.subplot(2, 2, i)
-            #     plt.plot(layer_x_mlp, y_axis_mlp[i][1], label=y_axis_mlp[i][0])
-            # plt.show()
+            imp_argsort = torch.argsort(whole_imps_mlp)
+            n_pruned = len(imp_argsort) - int(
+                len(imp_argsort) *
+                (1 - 0.2)
+            )
+            pruning_groups = imp_argsort[:n_pruned]
+            pruning_groups = pruning_groups.tolist()
+            pruning_groups.sort()
+
+            for z in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
+                layer = model.model.layers[z]
+                pruning_idxs = torch.tensor([], dtype=torch.int8)
+                for j in range(layer.mlp.gate_proj.out_features):
+                    # z-> current layer index
+                    # j-> current vector index (inside current layer)
+                    if (z - args.block_attention_layer_start) * layer.mlp.gate_proj.out_features + j in pruning_groups:
+                        pruning_idxs = torch.cat(
+                            (pruning_idxs,
+                             torch.tensor([j])
+                             ),
+                            dim=0)
+                pruning_ratio_mlp.append(apply_mask(layer.mlp.gate_proj, pruning_idxs.tolist(), "linear_out"))
+                apply_mask(layer.mlp.up_proj, pruning_idxs.tolist(), "linear_out")
+                apply_mask(layer.mlp.down_proj, pruning_idxs.tolist(), "linear_in")
+
+            plot((18, 6), layer_x_mlp,
+                 [('mlp', pruning_ratio_mlp), ('gradient', gradient_norm_mlp), ('weight', weight_norm_mlp),
+                  ('tylor imp', importance_norm_mlp), ('scaled imp', importance_norm_mlp_scale),
+                  ])
         else:
 
             for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
