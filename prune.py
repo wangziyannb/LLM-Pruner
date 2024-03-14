@@ -208,6 +208,7 @@ def plot(figure, x, y):
         plt.title(y[index][0])
         plt.plot(x, y[index][1], label=y[index][0])
     plt.show()
+    return
 
 
 def main(args):
@@ -334,13 +335,10 @@ def main(args):
             layer_x_mha = [x for x in range(args.block_attention_layer_start, args.block_attention_layer_end)]
             layer_x_mlp = [x for x in range(args.block_mlp_layer_start, args.block_mlp_layer_end)]
 
-            for z in range(32):
+            for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
                 layer = model.model.layers[z]
                 weight_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight).tolist())
                 gradient_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight.grad).tolist())
-                weight_norm_mlp.append(torch.linalg.matrix_norm(layer.mlp.gate_proj.weight).tolist())
-                gradient_norm_mlp.append(torch.linalg.matrix_norm(layer.mlp.gate_proj.weight.grad).tolist())
-
                 imps = imp(layer.self_attn.q_proj, "linear_out", [1])
                 importance_norm_mha.append(torch.linalg.vector_norm(imps).tolist())
                 imps_scaled = imps.clone()
@@ -353,6 +351,10 @@ def main(args):
                 imps = imps.view(-1, layer.self_attn.head_dim).sum(1)
                 whole_imps_attn = torch.cat((whole_imps_attn, imps), dim=0)
 
+            for z in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
+                layer = model.model.layers[z]
+                weight_norm_mlp.append(torch.linalg.matrix_norm(layer.mlp.gate_proj.weight).tolist())
+                gradient_norm_mlp.append(torch.linalg.matrix_norm(layer.mlp.gate_proj.weight.grad).tolist())
                 imps = imp(layer.mlp.gate_proj, "linear_out", [1])
                 importance_norm_mlp.append(torch.linalg.vector_norm(imps).tolist())
                 imps_scaled = imps.clone()
@@ -362,32 +364,6 @@ def main(args):
                 importance_norm_mlp_scale.append(torch.linalg.vector_norm(imps_scaled).tolist())
                 whole_imps_mlp_scaled_layer = torch.cat((whole_imps_mlp_scaled_layer, imps_scaled), dim=0)
                 whole_imps_mlp = torch.cat((whole_imps_mlp, imps), dim=0)
-
-            # for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
-            #     layer = model.model.layers[z]
-            #     weight_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight).tolist())
-            #     gradient_norm_mha.append(torch.linalg.matrix_norm(layer.self_attn.q_proj.weight.grad).tolist())
-            #     imps = imp(layer.self_attn.q_proj, "linear_out", [1])
-            #     importance_norm_mha.append(torch.linalg.vector_norm(imps).tolist())
-            #     # channel-wise normalization
-            #     # imps_scaled = imps.view(-1, layer.self_attn.head_dim).clone()
-            #     # mean = torch.mean(imps_scaled, dim=1, keepdim=True)
-            #     # stdev = torch.std(imps_scaled, dim=1, unbiased=False, keepdim=True)
-            #     # imps_scaled = (imps_scaled - mean) / stdev
-            #     # imps_scaled = imps_scaled.sum(1)
-            #     imps_scaled = imps.clone()
-            #     mean = torch.mean(imps_scaled)
-            #     stdev = torch.std(imps_scaled, unbiased=False)
-            #     imps_scaled = (imps_scaled - mean) / stdev
-            #
-            #     importance_norm_mha_scale.append(torch.linalg.vector_norm(imps_scaled).tolist())
-            #
-            #     imps_scaled = imps_scaled.view(-1, layer.self_attn.head_dim).sum(1)
-            #
-            #     whole_imps_attn_scaled_layer = torch.cat((whole_imps_attn_scaled_layer, imps_scaled), dim=0)
-            #
-            #     imps = imps.view(-1, layer.self_attn.head_dim).sum(1)
-            #     whole_imps_attn = torch.cat((whole_imps_attn, imps), dim=0)
 
             mean = torch.mean(whole_imps_attn)
             stdev = torch.std(whole_imps_attn, unbiased=False)
@@ -407,10 +383,11 @@ def main(args):
                   ("Scaled Importance global-wise", whole_imps_mlp_scaled.tolist()),
                   ("Scaled Importance layer-wise", whole_imps_mlp_scaled_layer.tolist())])
 
+            # imp_argsort = torch.argsort(whole_imps_attn_scaled_layer)
             imp_argsort = torch.argsort(whole_imps_attn_scaled_layer)
             n_pruned = len(imp_argsort) - int(
                 len(imp_argsort) *
-                (1 - 0.2)
+                (1 - args.pruning_ratio)
             )
             pruning_groups = imp_argsort[:n_pruned]
             pruning_groups = pruning_groups.tolist()
@@ -444,10 +421,10 @@ def main(args):
             #     apply_mask(layer.mlp.gate_proj, pruning_idxs.tolist(), "linear_out")
             #     apply_mask(layer.mlp.up_proj, pruning_idxs.tolist(), "linear_out")
             #     apply_mask(layer.mlp.down_proj, pruning_idxs.tolist(), "linear_in")
-            imp_argsort = torch.argsort(whole_imps_mlp)
+            imp_argsort = torch.argsort(whole_imps_mlp_scaled_layer)
             n_pruned = len(imp_argsort) - int(
                 len(imp_argsort) *
-                (1 - 0.2)
+                (1 - args.pruning_ratio)
             )
             pruning_groups = imp_argsort[:n_pruned]
             pruning_groups = pruning_groups.tolist()
@@ -477,7 +454,6 @@ def main(args):
 
             for z in range(args.block_attention_layer_start, args.block_attention_layer_end):
                 layer = model.model.layers[z]
-                pruning_idxs = []
                 if args.mask_type_mha == 'q':
                     imps = imp(layer.self_attn.q_proj, "linear_out", [])
                     pruning_idxs = get_mask(imps, layer.self_attn.q_proj, "linear_out",
@@ -506,9 +482,7 @@ def main(args):
                 apply_mask(layer.self_attn.o_proj, pruning_idxs.tolist(), "linear_in")
 
             for z in range(args.block_mlp_layer_start, args.block_mlp_layer_end):
-
                 layer = model.model.layers[z]
-                pruning_idxs = []
                 if args.mask_type_mlp == 'gate_proj':
                     imps = imp(layer.mlp.gate_proj, "linear_out", [])
                     pruning_idxs = get_mask(imps, layer.mlp.gate_proj, "linear_out",
